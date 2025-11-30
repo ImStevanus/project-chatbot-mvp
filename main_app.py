@@ -4,6 +4,7 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from textblob import TextBlob
+from itertools import chain # Tambahan untuk menggabungkan list
 
 # ==========================================
 # BAGIAN 1: LOGIKA & DATA (BACKEND)
@@ -65,17 +66,12 @@ def load_data():
         return pd.DataFrame()
 
 def get_program_description(program_name):
-    """Mencari deskripsi yang cocok berdasarkan nama jurusan."""
     for key, desc in PROGRAM_DESCRIPTIONS.items():
         if key in program_name:
             return desc
     return "Jurusan unggulan yang siap mencetak profesional handal di bidangnya."
 
 def get_course_advice(course_name):
-    """
-    Memberikan tips dan deskripsi umum berdasarkan kata kunci pada nama mata kuliah.
-    Ini adalah 'Smart Logic' karena kita tidak punya data tips spesifik per matkul.
-    """
     course_lower = course_name.lower()
     
     if any(x in course_lower for x in ['matematika', 'kalkulus', 'statistika', 'akuntansi', 'keuangan', 'fisika']):
@@ -109,11 +105,34 @@ def get_course_advice(course_name):
             "tip": "👨‍🍳 **Tips Sukses:** Perhatikan detail kebersihan (hygiene) dan standar pelayanan (service excellence). Disiplin dan attitude adalah nilai jual utama di industri hospitality."
         }
     else:
-        # Default tips jika tidak ada kata kunci yang cocok
         return {
             "desc": "Mata kuliah ini dirancang untuk memperkuat kompetensi dasar atau keahlian spesifik di jurusan kamu.",
             "tip": "📝 **Tips Sukses:** Catat poin-poin penting dosen yang tidak ada di slide. Aktif bertanya dan berdiskusi di kelas bisa jadi nilai tambah untuk pemahamanmu."
         }
+
+# --- FUNGSI: ESTIMASI TINGKAT KESULITAN ---
+def get_course_difficulty(course_name):
+    """
+    Estimasi tingkat kesulitan mata kuliah berdasarkan kata kunci di nama matkul.
+    Mengembalikan skor 1..5 (5 = paling sulit).
+    """
+    name = (course_name or "").lower()
+    score = 3
+
+    if any(k in name for k in ['matematika', 'kalkulus', 'statistika', 'fisika', 'teori']):
+        score = 5
+    elif any(k in name for k in ['algoritma', 'program', 'ngoding', 'coding', 'pemrograman', 'komput', 'software', 'data', 'machine']):
+        score = 4
+    elif any(k in name for k in ['akuntansi', 'keuangan', 'finance', 'audit', 'analisis']):
+        score = 4
+    elif any(k in name for k in ['praktikum', 'lab', 'laboratorium']):
+        score = 4
+    elif any(k in name for k in ['desain', 'gambar', 'seni', 'musik', 'film', 'kuliner', 'hospitality', 'bahasa', 'komunikasi']):
+        score = 2
+    else:
+        score = 3
+
+    return max(1, min(5, score))
 
 def detect_chatbot_responses(user_input):
     user_input_lower = user_input.lower()
@@ -222,17 +241,24 @@ def analyze_sentiment(user_input):
     except:
         return {'polarity': 0, 'subjectivity': 0, 'sentiment': 'neutral'}
 
-def expand_query(user_query):
+def expand_query(user_query, selected_keywords=None):
     expanded_query = user_query.lower()
     
     for keyword, expansion in KEYWORD_MAPPING.items():
         if keyword in expanded_query:
             expanded_query += ' ' + expansion
     
+    if selected_keywords:
+        for keyword in selected_keywords:
+            if keyword in KEYWORD_MAPPING:
+                expanded_query += ' ' + KEYWORD_MAPPING[keyword]
+            else:
+                expanded_query += ' ' + keyword
+    
     return expanded_query
 
-def get_recommendations(user_query, df_filtered, words_to_remove=None, top_n=10):
-    if not user_query.strip():
+def get_recommendations(user_query, df_filtered, words_to_remove=None, selected_keywords=None, top_n=10):
+    if not user_query.strip() and not selected_keywords:
         return pd.DataFrame()
     
     if df_filtered.empty:
@@ -245,7 +271,7 @@ def get_recommendations(user_query, df_filtered, words_to_remove=None, top_n=10)
     if df_filtered.empty:
         return pd.DataFrame()
     
-    expanded_query = expand_query(user_query)
+    expanded_query = expand_query(user_query, selected_keywords)
     
     tfidf_vectorizer = TfidfVectorizer(stop_words='english')
     tfidf_matrix = tfidf_vectorizer.fit_transform(df_filtered['combined_features'])
@@ -466,167 +492,134 @@ def render_landing_page():
     with col3:
         st.markdown('<div class="feature-card"><div class="feature-icon">✨</div><div class="feature-title">Mudah Digunakan</div><div class="feature-desc">Tinggal ketik & tanya</div></div>', unsafe_allow_html=True)
 
+def get_main_keywords():
+    return sorted(list(KEYWORD_MAPPING.keys()))
+
 def main_app():
     df = load_data()
     
-    # --- SIDEBAR ---
+    if 'selected_keywords' not in st.session_state:
+        st.session_state.selected_keywords = []
+
     with st.sidebar:
         st.title("🔍 Menu")
         if st.button("🏠 Home"):
             st.session_state['app_started'] = False
+            st.session_state.selected_keywords = [] # Reset keyword
             st.rerun()
         
         st.markdown("---")
         st.subheader("Filter Data")
-        program_list = ["Semua Jurusan"] + sorted(df['Program'].unique().tolist())
+        program_list = ["Semua Jurusan"] + sorted(df['Program'].unique().tolist()) if not df.empty else ["Semua Jurusan"]
         selected_program = st.selectbox("Program Studi", options=program_list)
-        semester_list = ["Semua Semester"] + sorted(df['Semester'].unique().tolist())
+        semester_list = ["Semua Semester"] + sorted(df['Semester'].unique().tolist()) if not df.empty else ["Semua Semester"]
         selected_semester = st.selectbox("Semester", options=semester_list)
-        
-        st.markdown("---")
-        st.subheader("Bookmark")
-        if st.session_state.bookmarks:
-            st.info(f"{len(st.session_state.bookmarks)} tersimpan")
-            with st.expander("Lihat Daftar"):
-                for idx, bm in enumerate(st.session_state.bookmarks):
-                    st.markdown(f"**{bm['Course']}**")
-                    if st.button("Hapus", key=f"del_{idx}"):
-                        st.session_state.bookmarks.pop(idx)
-                        st.rerun()
-                    st.divider()
-            if st.button("Clear All"):
-                st.session_state.bookmarks = []
-                st.rerun()
-            st.markdown("---")
-            st.subheader("Karir")
-            careers = recommend_career_paths(st.session_state.bookmarks)
-            if careers:
-                for c in careers:
-                    st.markdown(f"- {c}")
-        else:
-            st.caption("Belum ada bookmark.")
 
-    # --- MAIN CONTENT ---
+        # Filter tingkat kesulitan: range slider 1..5
+        st.markdown("---")
+        st.subheader("Filter Tingkat Kesulitan")
+        difficulty_range = st.slider("Pilih rentang bintang (1 = mudah, 5 = sangat sulit)", 1, 5, (1, 5), step=1)
+        
+        # Bookmark feature removed
+        st.markdown("---")
+        # (Sidebar sekarang hanya menampung filter dan kontrol lain)
+        
     st.markdown('<h1 style="text-align: center;">🎓 AI Course Advisor</h1>', unsafe_allow_html=True)
     st.markdown('<p style="text-align: center; color: #f0f0f0;">Ceritakan minatmu, dan AI akan mencarikan mata kuliah yang pas!</p>', unsafe_allow_html=True)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 1. CARA MENGGUNAKAN
     st.markdown("""
     ### 💡 Cara Menggunakan:
     1. **Pilih Filter** di sidebar (jurusan & semester) - opsional.
     2. **Ketik minat/hobi** kamu dengan bahasa santai.
-    3. Sistem akan mencari mata kuliah yang **cocok** dengan minat kamu.
+    3. Jika kamu ragu, tambahkan **Keyword Pembantu** di bawah input teks.
     4. Klik tombol **Cari** untuk melihat hasil!
-    5. Semakin tinggi skor, semakin cocok mata kuliah tersebut.
     """)
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Filter logic
-    df_filtered = df.copy()
-    if selected_program != "Semua Jurusan":
+    df_filtered = df.copy() if not df.empty else pd.DataFrame()
+    if not df_filtered.empty and selected_program != "Semua Jurusan":
         df_filtered = df_filtered[df_filtered['Program'] == selected_program]
-    if selected_semester != "Semua Semester":
+    if not df_filtered.empty and selected_semester != "Semua Semester":
         df_filtered = df_filtered[df_filtered['Semester'] == selected_semester]
 
-    # 2. INPUT SECTION
     c_in, c_btn = st.columns([4, 1])
     with c_in:
-        user_input = st.text_area("Minat", placeholder="Contoh: Saya suka desain tapi tidak suka hitungan...", height=80, label_visibility="collapsed")
+        user_input = st.text_area("Minat", placeholder="Contoh: Saya suka desain tapi tidak suka hitungan...", height=80, key="user_input_area", label_visibility="collapsed")
     with c_btn:
         st.markdown("<br>", unsafe_allow_html=True) 
         btn_cari = st.button("Cari 🚀")
+    
+    st.markdown("### ✨ Keyword Pembantu (Opsional)")
+    
+    main_keywords = get_main_keywords()
+    
+    selected_keywords_update = st.multiselect(
+        "Pilih kata kunci yang paling mewakili minatmu:",
+        options=main_keywords,
+        default=st.session_state.selected_keywords,
+        key="keyword_multiselect"
+    )
+    st.session_state.selected_keywords = selected_keywords_update
 
-    # 3. HASIL PENCARIAN
-    if btn_cari and user_input:
-        st.markdown("---")
-        with st.spinner("Sedang berpikir..."):
-            detect_chatbot_responses(user_input)
-            cleaned_input, words_to_remove = process_negation(user_input)
-            recs = get_recommendations(cleaned_input, df_filtered, words_to_remove)
-            
-            if not recs.empty:
-                st.subheader(f"Hasil: {len(recs)} Mata Kuliah")
-                for idx, row in recs.iterrows():
-                    prog_desc = get_program_description(row['Program'])
-                    advice = get_course_advice(row['Course']) # Ambil Tips Cerdas
-
-                    # Kartu Hasil (Warna Abu muda #f0f2f6 & Teks Hitam)
-                    st.markdown(f"""
-                    <div class="result-card" style="background: #f0f2f6; padding: 20px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #667eea;">
-                        <h3 style="margin:0; font-weight: 700;">{row['Course']}</h3>
-                        <p style="margin:5px 0 0 0; font-size: 0.9rem;">
-                            🎓 {row['Program']} | 📅 Semester {row['Semester']} | ⭐ {row['Similarity Score']}%
-                        </p>
-                    </div>
-                    """, unsafe_allow_html=True)
+    if btn_cari:
+        if not user_input and not st.session_state.selected_keywords:
+            st.warning("Mohon masukkan minat kamu atau pilih minimal satu Keyword Pembantu!")
+        else:
+            st.markdown("---")
+            with st.spinner("Sedang berpikir..."):
+                detect_chatbot_responses(user_input)
+                cleaned_input, words_to_remove = process_negation(user_input)
+                
+                recs = get_recommendations(cleaned_input, df_filtered, words_to_remove, st.session_state.selected_keywords)
+                
+                if not recs.empty:
+                    # Hitung tingkat kesulitan tiap matkul, tambahkan kolom dan filter sesuai slider
+                    recs['Difficulty'] = recs['Course'].apply(get_course_difficulty)
+                    # Filter rentang difficulty dari sidebar
+                    min_d, max_d = difficulty_range
+                    recs = recs[(recs['Difficulty'] >= min_d) & (recs['Difficulty'] <= max_d)]
                     
-                    # --- BAGIAN EXPANDER (TIPS & DESKRIPSI) ---
-                    # Ini bisa di-klik untuk Show/Hide
-                    with st.expander(f"💡 Lihat Tips & Deskripsi Matkul: {row['Course']}"):
-                        st.markdown(f"""
-                        **ℹ️ Deskripsi:** {prog_desc}
-                        
-                        ---
-                        {advice['tip']}
-                        """)
-
-                    # Tombol Simpan Bookmark
-                    is_saved = any(b['Course'] == row['Course'] for b in st.session_state.bookmarks)
-                    if not is_saved:
-                        if st.button(f"🔖 Simpan", key=f"save_{idx}"):
-                            st.session_state.bookmarks.append(row.to_dict())
-                            st.rerun()
+                    if recs.empty:
+                        st.warning("Tidak ada hasil pada rentang tingkat kesulitan yang dipilih. Coba sesuaikan filter.")
                     else:
-                        st.button(f"✅ Tersimpan", key=f"saved_{idx}", disabled=True)
-                    
-                    st.markdown("<br>", unsafe_allow_html=True) # Spacer antar kartu
-            else:
-                st.warning("Tidak ditemukan yang cocok.")
+                        st.subheader(f"Hasil: {len(recs)} Mata Kuliah")
+                        for idx, row in recs.iterrows():
+                            prog_desc = get_program_description(row['Program'])
+                            advice = get_course_advice(row['Course'])
 
-    # 4. INFO TAMBAHAN
-    st.markdown("---")
-    col_exp1, col_exp2 = st.columns(2)
-    
-    with col_exp1:
-        with st.expander("📖 Kata Kunci yang Dipahami Sistem"):
-            st.markdown("""
-            Sistem memahami berbagai kata santai seperti:
-            - **Kreatif/Seni:** menggambar, gambar, seni, desain
-            - **Bisnis:** jualan, dagang, bisnis
-            - **Teknologi:** ngoding, coding, komputer
-            - **Keuangan:** hitung, angka, uang
-            - **Pariwisata:** jalan-jalan, traveling, pariwisata
-            - **Kuliner:** masak, memasak, kuliner
-            - **Media:** komunikasi, film, musik
-            - **Data:** data, analytics, machine learning
-            - **Olahraga:** olahraga, sport, fitness
-            """)
-    
-    with col_exp2:
-        with st.expander("ℹ️ Tentang Sistem"):
-            st.markdown("""
-            **Sistem Rekomendasi Mata Kuliah UBM** menggunakan algoritma *TF-IDF & Cosine Similarity* untuk mencocokkan minat kamu dengan kurikulum yang tersedia.
-            
-            📊 Total Database: 356 mata kuliah
-                        
-            🎯 Algoritma: TF-IDF + Cosine Similarity
-                        
-            🧠 Smart Search: Keyword Expansion
-                        
-            🎓 Program Studi: 12 jurusan
-                        
-            📅 Semester: 1 - 8
-                        
-            Sistem ini menggunakan AI untuk menemukan mata kuliah yang paling sesuai dengan minat dan hobi Anda!
-            """)
+                            # Hitung bintang tampil
+                            difficulty_score = int(row['Difficulty'])
+                            stars = '★' * difficulty_score + '☆' * (5 - difficulty_score)
 
+                            st.markdown(f"""
+                            <div class="result-card" style="background: #f0f2f6; padding: 20px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #667eea;">
+                                <h3 style="margin:0; font-weight: 700;">{row['Course']}</h3>
+                                <p style="margin:5px 0 0 0; font-size: 0.9rem;">
+                                    🎓 {row['Program']} | 📅 Semester {row['Semester']} | ⭐ {row['Similarity Score']}%
+                                </p>
+                                <p style="margin:5px 0 0 0; font-size:0.95rem;">🔰 Tingkat Kesulitan: <span style="font-size:1.05rem;">{stars}</span></p>
+                            </div>
+                            """, unsafe_allow_html=True)
+                            
+                            with st.expander(f"💡 Lihat Tips & Deskripsi Matkul: {row['Course']}"):
+                                st.markdown(f"""
+                                **ℹ️ Deskripsi Jurusan:** {prog_desc}
+                                
+                                ---
+                                
+                                **📝 Info Mata Kuliah:** {advice['desc']}
+                                
+                                ---
+                                {advice['tip']}
+                                """)
+                            
+
+# ...existing code...
 def main():
     st.set_page_config(page_title="AI Course Advisor", page_icon="🎓", layout="wide")
     local_css()
     
-    if 'bookmarks' not in st.session_state:
-        st.session_state.bookmarks = []
     if 'app_started' not in st.session_state:
         st.session_state['app_started'] = False
         
