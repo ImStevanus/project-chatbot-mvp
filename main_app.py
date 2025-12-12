@@ -16,20 +16,16 @@ def local_css():
     @import url('https://fonts.googleapis.com/css2?family=Segoe+UI&display=swap');
     html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
     
-    /* Background & Text Colors */
     .stApp { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); background-attachment: fixed; }
     h1, h2, h3, h4, p, label, .stMarkdown, .stChatInput { color: white !important; }
     .stChatInput textarea { background-color: #2D3748 !important; color: white !important; }
     
-    /* Sidebar Text Fix */
     section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] div, section[data-testid="stSidebar"] span { color: #2d3748 !important; }
     
-    /* Card Style untuk Hasil */
     .result-card { background: #f0f2f6; padding: 20px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #667eea; }
     .result-card h3 { color: #31333F !important; margin: 0; }
     .result-card p, .result-card li { color: #31333F !important; }
     
-    /* Chat Bubble */
     div[data-testid="stChatMessage"] { background-color: rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 10px; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.2); }
     </style>
     """, unsafe_allow_html=True)
@@ -53,16 +49,48 @@ def load_data():
     except FileNotFoundError:
         return pd.DataFrame()
 
-# --- Helpers Lama (Dikembalikan) ---
+# --- FUNGSI BARU: TRANSLATE NIAT USER PAKE AI ---
+def get_keywords_via_ai(user_query):
+    """
+    Jika database tidak menemukan 'makan', fungsi ini meminta AI
+    menerjemahkannya menjadi 'kuliner', 'food', 'tata boga', dll.
+    """
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            
+            # Prompt cerdas untuk ekstraksi keyword
+            prompt = f"""
+            Tugas: Ubah input user yang santai menjadi kata kunci akademis/jurusan kuliah.
+            Input User: "{user_query}"
+            
+            Contoh:
+            - Input: "Suka makan" -> Output: kuliner tata boga food beverage hospitality
+            - Input: "Suka debat" -> Output: hukum komunikasi hubungan internasional
+            - Input: "Suka main game" -> Output: informatika desain game multimedia
+            
+            Output HANYA kata kuncinya saja (dipisah spasi). Jangan ada kata pengantar.
+            """
+            
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3, # Rendah agar fokus dan tidak ngarang
+                max_tokens=50,
+            )
+            return completion.choices[0].message.content
+    except:
+        return user_query # Jika error, kembalikan query asli
+    return user_query
+
+# --- Helpers Lama ---
 KEYWORD_MAPPING = {
     "menggambar": "desain visual art seni fotografi kreatif sketsa ilustrasi grafis",
     "jualan": "marketing bisnis manajemen pemasaran retail sales perdagangan kewirausahaan entrepreneur",
     "ngoding": "teknologi informasi sistem komputer data algoritma programming python web software aplikasi digital",
     "hitung": "akuntansi statistika matematika ekonomi keuangan pajak finance analisis",
     "jalan-jalan": "pariwisata hospitality hotel tour travel guide tourism wisata perhotelan",
-    "masak": "food beverage tata boga kitchen pastry kuliner makanan minuman chef",
-    "game": "game development interactive design programming unity multimedia",
-    "duit": "investasi keuangan bisnis entrepreneur kaya",
+    "masak": "food beverage tata boga kitchen pastry kuliner makanan minuman chef", # Keyword manual tetap ada sebagai backup cepat
 }
 
 def get_course_advice(course_name):
@@ -154,7 +182,7 @@ def page_recommendation():
         sel_prog = st.selectbox("Jurusan Spesifik:", prog_list)
         diff_range = st.slider("Filter Kesulitan (Bintang):", 1, 5, (1, 5))
     
-    user_input = st.text_area("Ceritakan minatmu:", height=100, placeholder="Contoh: Saya suka bisnis tapi gak mau yang banyak hitungan rumit...")
+    user_input = st.text_area("Ceritakan minatmu:", height=100, placeholder="Contoh: Saya suka banget makan...")
     
     if st.button("Analisis Minat 🚀"):
         if not user_input:
@@ -163,15 +191,26 @@ def page_recommendation():
             st.markdown("---")
             clean_text, ignored = process_negation(user_input)
             
-            # Filter Logic
+            # Filter Data Awal
             df_filter = df.copy()
             if sel_prog != "Semua Jurusan": 
                 df_filter = df_filter[df_filter['Program'] == sel_prog]
             
+            # 1. PERCOBAAN PERTAMA: Cari Langsung
             recs = get_recommendations(clean_text, df_filter, ignored)
             
+            # 2. PERCOBAAN KEDUA: Jika Kosong, Panggil Bantuan AI (SMART FALLBACK)
+            if recs.empty:
+                with st.spinner("Hmm, mencari hubungan minatmu dengan jurusan yang ada..."):
+                    # Minta AI menerjemahkan "Suka makan" -> "Kuliner Tata Boga"
+                    ai_keywords = get_keywords_via_ai(clean_text)
+                    st.caption(f"🤖 AI mendeteksi minat terkait: *{ai_keywords}*")
+                    
+                    # Cari ulang pakai kata kunci dari AI
+                    recs = get_recommendations(ai_keywords, df_filter, ignored)
+            
+            # Tampilkan Hasil
             if not recs.empty:
-                # Filter Difficulty
                 recs['Difficulty'] = recs['Course'].apply(get_course_difficulty)
                 recs = recs[(recs['Difficulty'] >= diff_range[0]) & (recs['Difficulty'] <= diff_range[1])]
                 
@@ -199,7 +238,8 @@ def page_recommendation():
                 else:
                     st.warning("Ada yang cocok, tapi tingkat kesulitannya di luar filter kamu.")
             else:
-                st.warning("Belum menemukan yang pas. Coba jelaskan lebih detail atau gunakan menu Chat AI!")
+                st.error("Waduh, database kami belum punya matkul yang cocok, meskipun sudah dibantu AI.")
+                st.info("Cobalah ngobrol langsung di menu '🤖 Chat Bebas (AI)' untuk saran lebih lanjut.")
 
 # ==========================================
 # 4. HALAMAN 2: CHAT AI (FACE-TO-FACE)
@@ -208,12 +248,10 @@ def page_chat_ai():
     st.title("🤖 Ngobrol Bareng AI")
     st.caption("Tanya apa saja seputar kuliah, curhat, atau tips belajar. AI akan menjawab secara real-time!")
 
-    # Tampilkan History
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Input Chat
     if prompt := st.chat_input("Tanya sesuatu..."):
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
@@ -226,7 +264,6 @@ def page_chat_ai():
                 if "GROQ_API_KEY" in st.secrets:
                     client = Groq(api_key=st.secrets["GROQ_API_KEY"])
                     
-                    # Context AI
                     messages_payload = [
                         {"role": "system", "content": "Kamu adalah Advisor Kampus UBM yang gaul, seru, dan suportif. Gunakan bahasa Indonesia santai dan emoji."}
                     ] + [
@@ -263,7 +300,6 @@ def main():
         st.session_state['app_started'] = False
 
     if not st.session_state['app_started']:
-        # Landing Page
         st.markdown("""
             <div style="text-align: center; padding: 50px; color: white;">
                 <div style="font-size: 80px; margin-bottom:20px;">🎓</div>
@@ -277,7 +313,6 @@ def main():
                 st.session_state['app_started'] = True
                 st.rerun()
     else:
-        # Sidebar Menu
         with st.sidebar:
             st.title("Menu Aplikasi")
             menu = st.radio("Pilih Mode:", ["🔍 Cari Jurusan (Database)", "🤖 Chat Bebas (AI)"])
@@ -286,7 +321,6 @@ def main():
                 st.session_state['app_started'] = False
                 st.rerun()
 
-        # Routing
         if menu == "🔍 Cari Jurusan (Database)":
             page_recommendation()
         elif menu == "🤖 Chat Bebas (AI)":
