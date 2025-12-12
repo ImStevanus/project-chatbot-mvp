@@ -3,21 +3,25 @@ import pandas as pd
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from groq import Groq  # <-- Ganti Gemini dengan Groq
+from groq import Groq  # Menggunakan Groq sebagai pengganti Gemini
 
 # ==========================================
 # BAGIAN 1: LOGIKA AI & DATA (BACKEND)
 # ==========================================
 
-# --- FUNGSI BARU: CHATBOT GROQ (LLAMA 3) ---
+# --- FUNGSI CHATBOT (PAKAI GROQ - LEBIH CEPAT & GRATIS) ---
 def ask_groq(query):
-    """Mengirim pertanyaan ke Groq (Llama 3) sebagai pengganti Gemini"""
+    """
+    Mengirim pertanyaan ke Groq (Llama 3)
+    Fungsi ini AMAN karena mengambil key dari st.secrets, bukan ditulis disini.
+    """
     try:
-        # Cek apakah API Key ada di secrets
+        # Cek apakah kunci rahasia ada di pengaturan Streamlit
         if "GROQ_API_KEY" in st.secrets:
+            # Inisialisasi Client Groq
             client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             
-            # Prompt Sistem (Instruksi Karakter AI)
+            # Instruksi untuk perilaku AI
             system_prompt = """
             Kamu adalah 'AI Course Advisor' untuk Universitas Bunda Mulia (UBM).
             Karaktermu: Ramah, gaul, suportif, dan kekinian. Gunakan emoji.
@@ -28,25 +32,26 @@ def ask_groq(query):
             3. Jangan bertele-tele.
             """
             
-            # Kirim Request ke Groq
+            # Kirim request ke API Groq
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                model="llama3-8b-8192",  # Model Llama 3 yang super cepat & gratis
-                temperature=0.7,         # Kreativitas (0.0 - 1.0)
+                model="llama3-8b-8192",  # Model ini sangat cepat dan stabil
+                temperature=0.7,         # Tingkat kreativitas
                 max_tokens=300,          # Batas panjang jawaban
             )
             
             return chat_completion.choices[0].message.content
         else:
-            return "⚠️ Yah, kunci AI (GROQ_API_KEY) belum dipasang di secrets.toml."
+            # Pesan error jika user lupa set API Key di secrets.toml
+            return "⚠️ Waduh, API Key belum dipasang. Cek file .streamlit/secrets.toml ya!"
             
     except Exception as e:
-        return f"Maaf, AI lagi pusing. Error: {str(e)}"
+        return f"Maaf, AI lagi pusing (Error: {str(e)})"
 
-# --- MAPPING KEYWORD (TETAP SAMA) ---
+# --- MAPPING KEYWORD (TETAP SAMA SEPERTI SEBELUMNYA) ---
 KEYWORD_MAPPING = {
     "menggambar": "desain visual art seni fotografi kreatif sketsa ilustrasi grafis",
     "jualan": "marketing bisnis manajemen pemasaran retail sales perdagangan kewirausahaan entrepreneur",
@@ -59,6 +64,7 @@ KEYWORD_MAPPING = {
     "duit": "investasi keuangan bisnis entrepreneur kaya",
 }
 
+# --- DESKRIPSI JURUSAN ---
 PROGRAM_DESCRIPTIONS = {
     "Informatika": "Mempelajari pengembangan software, teknologi jaringan, dan komputasi cerdas.",
     "Sistem Informasi": "Menggabungkan ilmu komputer dengan manajemen bisnis.",
@@ -73,10 +79,11 @@ PROGRAM_DESCRIPTIONS = {
     "Psikologi": "Mempelajari perilaku manusia dan proses mental."
 }
 
+# --- FUNGSI LOAD DATA ---
 @st.cache_data
 def load_data():
     try:
-        # Load CSV (Pastikan nama file sesuai dengan yang ada di folder kamu)
+        # Pastikan nama file Excel/CSV sesuai dengan yang ada di folder project kamu
         df = pd.read_csv('List Mata Kuliah UBM.xlsx - Sheet1.csv')
         df = df.dropna(subset=['Course']) 
         df['combined_features'] = df['Course'].astype(str) + ' ' + df['Program'].astype(str)
@@ -84,6 +91,7 @@ def load_data():
     except FileNotFoundError:
         return pd.DataFrame()
 
+# --- HELPER FUNCTIONS ---
 def get_course_advice(course_name):
     course_lower = course_name.lower()
     if any(x in course_lower for x in ['matematika', 'statistik', 'akuntansi']):
@@ -171,7 +179,7 @@ def recommend_career_paths(courses_list):
     return list(careers)[:5]
 
 # ==========================================
-# BAGIAN 2: UI/UX & LANDING PAGE
+# BAGIAN 2: UI/UX & TAMPILAN
 # ==========================================
 
 def local_css():
@@ -226,7 +234,7 @@ def main_app():
         
         diff_range = st.slider("Tingkat Kesulitan (Bintang)", 1, 5, (1, 5))
 
-    st.title("🎓 Tanya AI Course Advisor (Powered by Groq)")
+    st.title("🎓 Tanya AI Course Advisor")
     st.markdown("Ceritakan minatmu (misal: *'Suka gambar tapi gak suka itungan'*), atau tanya hal bebas!")
     
     user_input = st.text_area("Ketik disini...", height=80, placeholder="Contoh: Saya mau jadi pebisnis yang jago IT...")
@@ -239,10 +247,12 @@ def main_app():
             
             clean_text, ignored = process_negation(user_input)
             
+            # Filter Data
             df_filter = df.copy()
             if sel_prog != "Semua Jurusan": 
                 df_filter = df_filter[df_filter['Program'] == sel_prog]
             
+            # Cari Rekomendasi
             recs = get_recommendations(clean_text, df_filter, ignored)
             
             # --- SKENARIO A: Ada Matkul yang Cocok ---
@@ -274,7 +284,7 @@ def main_app():
                     
                     # --- AI COMMENT (GROQ) ---
                     with st.spinner("AI sedang menganalisis pilihanmu..."):
-                        # Menggunakan ask_groq, bukan ask_gemini
+                        # Panggil Groq disini
                         ai_comment = ask_groq(f"User minatnya: '{user_input}'. Matkul yang cocok: {recs['Course'].iloc[0]}. Berikan semangat singkat!")
                         st.markdown(f'<div class="ai-chat">🤖 <b>Komentar AI:</b><br>{ai_comment}</div>', unsafe_allow_html=True)
                 else:
@@ -283,7 +293,7 @@ def main_app():
             # --- SKENARIO B: Tidak Ada Matkul / Tanya Bebas ---
             else:
                 st.warning("Database kampus belum menemukan matkul spesifik...")
-                with st.spinner("Tanya ke AI Advisor (Groq)..."):
+                with st.spinner("Tanya ke AI Advisor..."):
                     # Langsung tanya Groq
                     ai_response = ask_groq(user_input)
                     st.markdown(f'<div class="ai-chat">🤖 <b>Jawaban AI:</b><br>{ai_response}</div>', unsafe_allow_html=True)
