@@ -3,25 +3,20 @@ import pandas as pd
 import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from groq import Groq  # Menggunakan Groq sebagai pengganti Gemini
+from groq import Groq
 
 # ==========================================
 # BAGIAN 1: LOGIKA AI & DATA (BACKEND)
 # ==========================================
 
-# --- FUNGSI CHATBOT (PAKAI GROQ - LEBIH CEPAT & GRATIS) ---
 def ask_groq(query):
     """
-    Mengirim pertanyaan ke Groq (Llama 3)
-    Fungsi ini AMAN karena mengambil key dari st.secrets, bukan ditulis disini.
+    Mengirim pertanyaan ke Groq menggunakan model terbaru (Llama 3.3)
     """
     try:
-        # Cek apakah kunci rahasia ada di pengaturan Streamlit
         if "GROQ_API_KEY" in st.secrets:
-            # Inisialisasi Client Groq
             client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             
-            # Instruksi untuk perilaku AI
             system_prompt = """
             Kamu adalah 'AI Course Advisor' untuk Universitas Bunda Mulia (UBM).
             Karaktermu: Ramah, gaul, suportif, dan kekinian. Gunakan emoji.
@@ -29,29 +24,30 @@ def ask_groq(query):
             Tugasmu:
             1. Hubungkan curhatan/hobi user dengan jurusan kuliah yang relevan.
             2. Jawab dengan singkat, padat, dan jelas (maksimal 3-4 kalimat).
-            3. Jangan bertele-tele.
             """
             
-            # Kirim request ke API Groq
             chat_completion = client.chat.completions.create(
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
                 ],
-                model="llama3-8b-8192",  # Model ini sangat cepat dan stabil
-                temperature=0.7,         # Tingkat kreativitas
-                max_tokens=300,          # Batas panjang jawaban
+                # --- PERBAIKAN DISINI ---
+                # Model lama 'llama3-8b-8192' sudah mati. 
+                # Kita ganti ke 'llama-3.3-70b-versatile' (Paling baru & Canggih)
+                model="llama-3.3-70b-versatile", 
+                
+                temperature=0.7,
+                max_tokens=300,
             )
             
             return chat_completion.choices[0].message.content
         else:
-            # Pesan error jika user lupa set API Key di secrets.toml
-            return "⚠️ Waduh, API Key belum dipasang. Cek file .streamlit/secrets.toml ya!"
+            return "⚠️ Waduh, API Key Groq belum dipasang di secrets.toml."
             
     except Exception as e:
         return f"Maaf, AI lagi pusing (Error: {str(e)})"
 
-# --- MAPPING KEYWORD (TETAP SAMA SEPERTI SEBELUMNYA) ---
+# --- MAPPING KEYWORD ---
 KEYWORD_MAPPING = {
     "menggambar": "desain visual art seni fotografi kreatif sketsa ilustrasi grafis",
     "jualan": "marketing bisnis manajemen pemasaran retail sales perdagangan kewirausahaan entrepreneur",
@@ -64,7 +60,6 @@ KEYWORD_MAPPING = {
     "duit": "investasi keuangan bisnis entrepreneur kaya",
 }
 
-# --- DESKRIPSI JURUSAN ---
 PROGRAM_DESCRIPTIONS = {
     "Informatika": "Mempelajari pengembangan software, teknologi jaringan, dan komputasi cerdas.",
     "Sistem Informasi": "Menggabungkan ilmu komputer dengan manajemen bisnis.",
@@ -79,11 +74,9 @@ PROGRAM_DESCRIPTIONS = {
     "Psikologi": "Mempelajari perilaku manusia dan proses mental."
 }
 
-# --- FUNGSI LOAD DATA ---
 @st.cache_data
 def load_data():
     try:
-        # Pastikan nama file Excel/CSV sesuai dengan yang ada di folder project kamu
         df = pd.read_csv('List Mata Kuliah UBM.xlsx - Sheet1.csv')
         df = df.dropna(subset=['Course']) 
         df['combined_features'] = df['Course'].astype(str) + ' ' + df['Program'].astype(str)
@@ -91,7 +84,6 @@ def load_data():
     except FileNotFoundError:
         return pd.DataFrame()
 
-# --- HELPER FUNCTIONS ---
 def get_course_advice(course_name):
     course_lower = course_name.lower()
     if any(x in course_lower for x in ['matematika', 'statistik', 'akuntansi']):
@@ -252,7 +244,6 @@ def main_app():
             if sel_prog != "Semua Jurusan": 
                 df_filter = df_filter[df_filter['Program'] == sel_prog]
             
-            # Cari Rekomendasi
             recs = get_recommendations(clean_text, df_filter, ignored)
             
             # --- SKENARIO A: Ada Matkul yang Cocok ---
@@ -284,7 +275,6 @@ def main_app():
                     
                     # --- AI COMMENT (GROQ) ---
                     with st.spinner("AI sedang menganalisis pilihanmu..."):
-                        # Panggil Groq disini
                         ai_comment = ask_groq(f"User minatnya: '{user_input}'. Matkul yang cocok: {recs['Course'].iloc[0]}. Berikan semangat singkat!")
                         st.markdown(f'<div class="ai-chat">🤖 <b>Komentar AI:</b><br>{ai_comment}</div>', unsafe_allow_html=True)
                 else:
@@ -294,7 +284,6 @@ def main_app():
             else:
                 st.warning("Database kampus belum menemukan matkul spesifik...")
                 with st.spinner("Tanya ke AI Advisor..."):
-                    # Langsung tanya Groq
                     ai_response = ask_groq(user_input)
                     st.markdown(f'<div class="ai-chat">🤖 <b>Jawaban AI:</b><br>{ai_response}</div>', unsafe_allow_html=True)
 
