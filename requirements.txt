@@ -3,4 +3,4 @@ pandas
 scikit-learn
 textblob
 openpyxl
-google-generativeai
+groq
