@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import re
+import json
+import os
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
@@ -20,7 +22,18 @@ def local_css():
     h1, h2, h3, h4, p, label, .stMarkdown, .stChatInput { color: white !important; }
     .stChatInput textarea { background-color: #2D3748 !important; color: white !important; }
     
-    section[data-testid="stSidebar"] h1, section[data-testid="stSidebar"] p, section[data-testid="stSidebar"] label, section[data-testid="stSidebar"] div, section[data-testid="stSidebar"] span { color: #2d3748 !important; }
+    section[data-testid="stSidebar"] h1,
+    section[data-testid="stSidebar"] h2,
+    section[data-testid="stSidebar"] h3,
+    section[data-testid="stSidebar"] p,
+    section[data-testid="stSidebar"] label,
+    section[data-testid="stSidebar"] div,
+    section[data-testid="stSidebar"] span,
+    section[data-testid="stSidebar"] .stRadio,
+    section[data-testid="stSidebar"] .stSelectbox,
+    section[data-testid="stSidebar"] .stSlider {
+        color: white !important;
+    }
     
     .result-card { background: #f0f2f6; padding: 20px; border-radius: 15px; margin-bottom: 15px; border-left: 5px solid #667eea; }
     .result-card h3 { color: #31333F !important; margin: 0; }
@@ -38,6 +51,51 @@ local_css()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "bookmarks" not in st.session_state:
+    st.session_state.bookmarks = []
+if 'menu' not in st.session_state:
+    st.session_state['menu'] = "🔍 Cari Jurusan (Database)"
+
+# Files to persist bookmarks
+BOOKMARK_JSON = 'bookmarks.json'
+BOOKMARK_CSV = 'bookmarks.csv'
+
+def load_bookmarks_from_file():
+    # Prefer JSON, fallback to CSV
+    try:
+        if os.path.exists(BOOKMARK_JSON):
+            with open(BOOKMARK_JSON, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+    except Exception:
+        pass
+    try:
+        if os.path.exists(BOOKMARK_CSV):
+            df = pd.read_csv(BOOKMARK_CSV)
+            return df.to_dict('records')
+    except Exception:
+        pass
+    return []
+
+def save_bookmarks_to_file(bookmarks):
+    try:
+        # JSON
+        with open(BOOKMARK_JSON, 'w', encoding='utf-8') as f:
+            json.dump(bookmarks, f, ensure_ascii=False, indent=2)
+        # CSV
+        if bookmarks:
+            pd.DataFrame(bookmarks).to_csv(BOOKMARK_CSV, index=False)
+        else:
+            # write an empty csv with headers
+            pd.DataFrame(columns=['Course', 'Program', 'Similarity Score', 'Difficulty', 'Advice']).to_csv(BOOKMARK_CSV, index=False)
+    except Exception as e:
+        # we don't want to crash the app for persistence errors
+        st.warning(f"Gagal menyimpan bookmark: {e}")
+
+# Load persisted bookmarks into session state on startup
+if not st.session_state.bookmarks:
+    st.session_state.bookmarks = load_bookmarks_from_file()
 
 @st.cache_data
 def load_data():
@@ -112,6 +170,97 @@ def get_course_difficulty(course_name):
     elif any(k in name for k in ['algoritma', 'program', 'akuntansi']): return 4
     elif any(k in name for k in ['desain', 'bahasa', 'komunikasi']): return 2
     return 3
+
+
+def bookmark_course(course, program, similarity, difficulty, advice):
+    """Callback to add a course to bookmarks (safe for Streamlit on_click)."""
+    c = str(course).strip()
+    existing = [b for b in st.session_state.bookmarks if b.get('Course') == c]
+    if not existing:
+        st.session_state.bookmarks.append({
+            'Course': c,
+            'Program': program,
+            'Similarity Score': similarity,
+            'Difficulty': int(difficulty) if difficulty is not None else get_course_difficulty(c),
+            'Advice': advice
+        })
+        save_bookmarks_to_file(st.session_state.bookmarks)
+        try:
+            # Tetap pertahankan ini jika Anda ingin otomatis pindah ke halaman bookmark setelah simpan
+            st.query_params = {'menu': ['bookmarks']} 
+        except Exception:
+            pass
+        # BLOK st.rerun() SUDAH DIHAPUS DI SINI. Streamlit akan otomatis rerun.
+        
+    else:
+        # If already exists, keep UX consistent
+        try:
+            st.info("Sudah ada di Bookmark")
+        except Exception:
+            pass
+
+
+def remove_bookmark(course):
+    """Remove a bookmark by course name. Safe to call from `on_click`."""
+    c = str(course).strip()
+    before = len(st.session_state.bookmarks)
+    st.session_state.bookmarks = [b for b in st.session_state.bookmarks if b.get('Course') != c]
+    if len(st.session_state.bookmarks) < before:
+        save_bookmarks_to_file(st.session_state.bookmarks)
+        try:
+            st.success(f"Dihapus: {c}")
+        except Exception:
+            pass
+    else:
+        try:
+            st.info("Bookmark tidak ditemukan")
+        except Exception:
+            pass
+
+
+def remove_bookmark_by_index(idx):
+    """Remove a bookmark by index (safer for URL-triggered actions)."""
+    try:
+        idx = int(idx)
+        if 0 <= idx < len(st.session_state.bookmarks):
+            removed = st.session_state.bookmarks.pop(idx)
+            save_bookmarks_to_file(st.session_state.bookmarks)
+            try:
+                st.success(f"Dihapus: {removed.get('Course')}")
+            except Exception:
+                pass
+            return True
+    except Exception:
+        pass
+    try:
+        st.info("Bookmark tidak ditemukan")
+    except Exception:
+        pass
+    return False
+
+
+def confirm_delete_yes(course):
+    """Handler for confirming deletion from modal/buttons."""
+    remove_bookmark(course)
+    st.session_state['confirm_delete'] = None
+    try:
+        st.rerun()
+    except Exception:
+        pass
+
+
+def confirm_delete_no():
+    """Handler for cancelling deletion."""
+    st.session_state['confirm_delete'] = None
+    try:
+        st.rerun()
+    except Exception:
+        pass
+
+
+def request_remove_bookmark(course):
+    """Set a session flag to confirm bookmark deletion."""
+    st.session_state['confirm_delete'] = str(course).strip()
 
 def recommend_career_paths(courses_list):
     if not courses_list: return []
@@ -216,11 +365,13 @@ def page_recommendation():
                 
                 if not recs.empty:
                     st.success(f"✅ Ditemukan {len(recs)} Mata Kuliah yang pas!")
-                    
-                    for idx, row in recs.iterrows():
+
+                    # reset index to have stable small integer indices for button keys
+                    recs = recs.reset_index(drop=True)
+                    for i, row in recs.iterrows():
                         stars = '★' * int(row['Difficulty']) + '☆' * (5 - int(row['Difficulty']))
                         advice = get_course_advice(row['Course'])
-                        
+
                         st.markdown(f"""
                         <div class="result-card">
                             <h3>{row['Course']}</h3>
@@ -228,15 +379,14 @@ def page_recommendation():
                             <p>Tingkat Kesulitan: <span style="color:#f1c40f; font-size:18px;">{stars}</span></p>
                         </div>
                         """, unsafe_allow_html=True)
-                        with st.expander(f"💡 Tips Sukses Mata Kuliah Ini"):
-                            st.info(advice)
-                    
-                    careers = recommend_career_paths(recs.to_dict('records'))
-                    if careers:
-                        st.markdown("### 💼 Prospek Karir Masa Depan:")
-                        st.write(", ".join(careers))
-                else:
-                    st.warning("Ada yang cocok, tapi tingkat kesulitannya di luar filter kamu.")
+                        col_a, col_b = st.columns([4,1])
+                        with col_a:
+                            with st.expander(f"💡 Tips Sukses Mata Kuliah Ini"):
+                                st.info(advice)
+                        with col_b:
+                            # Bookmark button uses on_click callback for correctness
+                            btn_key = f"bookmark_{i}"
+                            st.button("📌 Bookmark", key=btn_key, on_click=bookmark_course, args=(row['Course'], row['Program'], row.get('Similarity Score', None), int(row['Difficulty']) if 'Difficulty' in row else get_course_difficulty(row['Course']), advice))
             else:
                 st.error("Waduh, database kami belum punya matkul yang cocok, meskipun sudah dibantu AI.")
                 st.info("Cobalah ngobrol langsung di menu '🤖 Chat Bebas (AI)' untuk saran lebih lanjut.")
@@ -292,6 +442,80 @@ def page_chat_ai():
             
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
+# --- LOGIKA BACKEND YANG PERLU DIUBAH ---
+
+def confirm_delete_yes(course):
+    """Handler for confirming deletion from modal/buttons."""
+    remove_bookmark(course)
+    st.session_state['confirm_delete'] = None
+
+def confirm_delete_no():
+    """Handler for cancelling deletion."""
+    st.session_state['confirm_delete'] = None
+
+# ==========================================
+# 4.5 HALAMAN: BOOKMARKS (MATA KULIAH TERSIMPAN)
+# ==========================================
+def page_bookmarks():
+    st.title("📜 Bookmark (Mata Kuliah Tersimpan)")
+    st.markdown("Daftar mata kuliah yang kamu simpan. Hapus jika sudah tidak perlu.")
+
+    if not st.session_state.bookmarks:
+        st.info("Belum ada bookmark. Simpan mata kuliah dari hasil pencarian menggunakan tombol 📌.")
+        st.session_state['confirm_delete'] = None
+        return
+
+    # Ambil nama mata kuliah yang sedang menunggu konfirmasi hapus
+    to_delete = st.session_state.get('confirm_delete')
+
+    # --- MEMULAI PERULANGAN UNTUK SETIAP BOOKMARK ---
+    for i, b in enumerate(st.session_state.bookmarks):
+        
+        # 1. Tampilkan Kartu Mata Kuliah
+        stars = '★' * int(b.get('Difficulty', 3)) + '☆' * (5 - int(b.get('Difficulty', 3)))
+        st.markdown(f"""
+        <div class="result-card">
+            <h3>{b['Course']}</h3>
+            <p>🎓 {b.get('Program', '-')} | ⭐ Kecocokan: {b.get('Similarity Score', '-')}%</p>
+            <p>Tingkat Kesulitan: <span style="color:#f1c40f; font-size:18px;">{stars}</span></p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.expander("💡 Tips Sukses Mata Kuliah Ini"):
+            st.info(b.get('Advice', get_course_advice(b['Course'])))
+
+        btn_key = f"request_remove_{i}_{re.sub(r'\\W+', '_', b['Course'])}"
+        
+        # 2. Tampilkan Tombol Hapus Bookmark
+        st.button("🗑️ Hapus Bookmark", key=btn_key, on_click=request_remove_bookmark, args=(b['Course'],))
+
+        
+        # --- 3. LOGIKA KONFIRMASI (BERADA DI DALAM LOOP) ---
+        # Konfirmasi hanya ditampilkan jika:
+        # a. Ada item yang akan dihapus (to_delete is not None)
+        # b. Item yang akan dihapus SAMA dengan mata kuliah saat ini (b['Course'])
+        if to_delete and to_delete == b['Course']:
+            safe_key_yes = f"inline_yes_{re.sub(r'\\W+', '_', to_delete)}"
+            safe_key_no = f"inline_no_{re.sub(r'\\W+', '_', to_delete)}"
+            
+            # Catatan: Kita menggunakan fallback inline karena st.modal (jika tersedia)
+            # adalah pop-up yang mengambang, bukan elemen yang bisa diletakkan di bawah course.
+
+            st.warning(f"⚠️ **KONFIRMASI PENGHAPUSAN:** Yakin ingin menghapus '{to_delete}'?")
+            
+            # Tombol "Ya, Hapus"
+            col_y_inline, col_n_inline = st.columns([1,1])
+            with col_y_inline:
+                st.button("✅ Ya, Hapus", key=safe_key_yes, on_click=confirm_delete_yes, args=(to_delete,), type="primary")
+            with col_n_inline:
+                st.button("❌ Batal", key=safe_key_no, on_click=confirm_delete_no)
+        
+        st.markdown("<hr style='border: 1px solid #333333;'>", unsafe_allow_html=True)
+
+
+    # --- PENTING: HAPUS SEMUA LOGIKA KONFIRMASI YANG SEBELUMNYA ADA DI BAWAH LOOP ---
+    # Jika sebelumnya ada blok konfirmasi di luar perulangan, pastikan sudah dihapus.
+
 # ==========================================
 # 5. NAVIGASI UTAMA
 # ==========================================
@@ -304,7 +528,7 @@ def main():
             <div style="text-align: center; padding: 50px; color: white;">
                 <div style="font-size: 80px; margin-bottom:20px;">🎓</div>
                 <h1 style="color:white !important; font-size: 3em;">AI Course Advisor</h1>
-                <p style="font-size: 1.2em;">Konsultan Akademik Pribadimu, 24/7.</p>
+                <p style="color:white !important; font-size: 1.2em;">Konsultan Akademik Pribadimu, 24/7.</p>
             </div>
         """, unsafe_allow_html=True)
         col1, col2, col3 = st.columns([1,1,1])
@@ -313,18 +537,92 @@ def main():
                 st.session_state['app_started'] = True
                 st.rerun()
     else:
+        # Check query params for navigation fallback BEFORE widgets are created
+        try:
+            qp = st.query_params
+            # handle confirm yes/no via query params (used by HTML fallback modal)
+            if 'confirm_index' in qp:
+                try:
+                    raw = qp.get('confirm_index', [None])[0]
+                    if raw is not None:
+                        from urllib.parse import unquote_plus
+                        idx_raw = unquote_plus(raw)
+                        remove_bookmark_by_index(idx_raw)
+                        st.session_state['confirm_delete'] = None
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        st.query_params = {}
+                    except Exception:
+                        pass
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+            elif 'confirm_yes' in qp:
+                # backward-compatible: try deletion by name if index not provided
+                try:
+                    raw = qp.get('confirm_yes', [None])[0]
+                    if raw:
+                        from urllib.parse import unquote_plus
+                        course_to_delete = unquote_plus(raw)
+                        remove_bookmark(course_to_delete)
+                        st.session_state['confirm_delete'] = None
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        st.query_params = {}
+                    except Exception:
+                        pass
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+            if 'confirm_no' in qp:
+                # user cancelled via HTML fallback; clear state
+                try:
+                    st.session_state['confirm_delete'] = None
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        st.query_params = {}
+                    except Exception:
+                        pass
+                try:
+                    st.rerun()
+                except Exception:
+                    pass
+
+            if qp.get('menu') == ['bookmarks']:
+                st.session_state['menu'] = "📜 Bookmark (Mata Kuliah Tersimpan)"
+                # clear query params
+                try:
+                    st.query_params = {}
+                except Exception:
+                    pass
+        except Exception:
+            # In some runtimes, query_params may not be available; ignore
+            pass
+
         with st.sidebar:
             st.title("Menu Aplikasi")
-            menu = st.radio("Pilih Mode:", ["🔍 Cari Jurusan (Database)", "🤖 Chat Bebas (AI)"])
+            # bind radio directly to session_state key 'menu' so we can programmatically change it
+            st.radio("Pilih Mode:", ["🔍 Cari Jurusan (Database)", "🤖 Chat Bebas (AI)", "📜 Bookmark (Mata Kuliah Tersimpan)"], key='menu')
             st.markdown("---")
             if st.button("🏠 Kembali ke Depan"):
                 st.session_state['app_started'] = False
                 st.rerun()
 
+        menu = st.session_state.get('menu', "🔍 Cari Jurusan (Database)")
         if menu == "🔍 Cari Jurusan (Database)":
             page_recommendation()
         elif menu == "🤖 Chat Bebas (AI)":
             page_chat_ai()
+        elif menu == "📜 Bookmark (Mata Kuliah Tersimpan)":
+            page_bookmarks()
 
 if __name__ == "__main__":
     main()
