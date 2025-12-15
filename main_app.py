@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import json
 import os
+import plotly.express as px
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from groq import Groq
@@ -39,6 +40,13 @@ def local_css():
     .result-card h3 { color: #31333F !important; margin: 0; }
     .result-card p, .result-card li { color: #31333F !important; }
     
+    /* Ganti warna header tabel di Streamlit */
+    .stDataFrame the-ad-hoc-table-header, 
+    .stDataFrame thead th {
+        background-color: #764ba2 !important; 
+        color: white !important;
+    }
+    
     div[data-testid="stChatMessage"] { background-color: rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 10px; margin-bottom: 10px; border: 1px solid rgba(255,255,255,0.2); }
     </style>
     """, unsafe_allow_html=True)
@@ -49,19 +57,75 @@ local_css()
 # 2. LOGIKA DATA & AI (BACKEND)
 # ==========================================
 
+# --- FUNGSI UTAMA VISUALISASI ---
+def create_interest_map(results):
+    """
+    Membuat peta minat interaktif (Bubble Chart) berdasarkan hasil analisis.
+    """
+    if not results:
+        st.info("Tidak ada hasil yang tersedia untuk visualisasi.")
+        return
+
+    df = pd.DataFrame(results)
+    df['Similarity Score'] = pd.to_numeric(df['Similarity Score'], errors='coerce')
+    df['Difficulty'] = pd.to_numeric(df['Difficulty'], errors='coerce')
+    df.dropna(subset=['Similarity Score', 'Difficulty'], inplace=True)
+    df['Cluster'] = df['Program'].apply(lambda x: str(x).split()[0] if isinstance(x, str) else 'Lain-lain')
+    
+    fig = px.scatter(
+        df, 
+        x='Similarity Score', 
+        y='Difficulty', 
+        size='Similarity Score', 
+        color='Cluster', 
+        hover_name='Course', 
+        size_max=60, 
+        title='Peta Kecocokan Mata Kuliah Berdasarkan Minat'
+    )
+
+    fig.update_layout(
+        xaxis_title="Kecocokan Minat (Skor Lebih Tinggi = Lebih Baik)",
+        yaxis_title="Tingkat Kesulitan (5 = Sangat Sulit)",
+        showlegend=True,
+        height=500
+    )
+    
+    fig.update_xaxes(range=[0, 100])
+    fig.update_yaxes(range=[0, 5])
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+# --- INISIALISASI SESSION STATE ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "bookmarks" not in st.session_state:
     st.session_state.bookmarks = []
 if 'menu' not in st.session_state:
     st.session_state['menu'] = "🔍 Cari Jurusan (Database)"
+# --- INISIALISASI STATE FITUR #2 (PERBANDINGAN) ---
+if "compare_list" not in st.session_state:
+    st.session_state.compare_list = []
+if "ai_compare_request" not in st.session_state:
+    st.session_state.ai_compare_request = False
+# --- INISIALISASI STATE FITUR #3 (SIMULASI DAMPAK) ---
+if "impact_course" not in st.session_state:
+    st.session_state.impact_course = None
+if "impact_result" not in st.session_state:
+    st.session_state.impact_result = None
+# --- INISIALISASI STATE FITUR #4 (ANALISIS JALUR) ---
+if "path_query" not in st.session_state:
+    st.session_state.path_query = None
+if "path_analysis" not in st.session_state:
+    st.session_state.path_analysis = None
+# ----------------------------------------------------
+
 
 # Files to persist bookmarks
 BOOKMARK_JSON = 'bookmarks.json'
 BOOKMARK_CSV = 'bookmarks.csv'
 
 def load_bookmarks_from_file():
-    # Prefer JSON, fallback to CSV
     try:
         if os.path.exists(BOOKMARK_JSON):
             with open(BOOKMARK_JSON, 'r', encoding='utf-8') as f:
@@ -80,17 +144,13 @@ def load_bookmarks_from_file():
 
 def save_bookmarks_to_file(bookmarks):
     try:
-        # JSON
         with open(BOOKMARK_JSON, 'w', encoding='utf-8') as f:
             json.dump(bookmarks, f, ensure_ascii=False, indent=2)
-        # CSV
         if bookmarks:
             pd.DataFrame(bookmarks).to_csv(BOOKMARK_CSV, index=False)
         else:
-            # write an empty csv with headers
             pd.DataFrame(columns=['Course', 'Program', 'Similarity Score', 'Difficulty', 'Advice']).to_csv(BOOKMARK_CSV, index=False)
     except Exception as e:
-        # we don't want to crash the app for persistence errors
         st.warning(f"Gagal menyimpan bookmark: {e}")
 
 # Load persisted bookmarks into session state on startup
@@ -100,32 +160,27 @@ if not st.session_state.bookmarks:
 @st.cache_data
 def load_data():
     try:
+        # PENTING: Pastikan nama file CSV ini benar
         df = pd.read_csv('List Mata Kuliah UBM.xlsx - Sheet1.csv')
         df = df.dropna(subset=['Course']) 
         df['combined_features'] = df['Course'].astype(str) + ' ' + df['Program'].astype(str)
         return df
     except FileNotFoundError:
+        st.error("File data 'List Mata Kuliah UBM.xlsx - Sheet1.csv' tidak ditemukan. Pastikan sudah ada.")
         return pd.DataFrame()
 
-# --- FUNGSI BARU: TRANSLATE NIAT USER PAKE AI ---
+# --- FUNGSI AI UNTUK TRANSLASI MINAT ---
 def get_keywords_via_ai(user_query):
-    """
-    Jika database tidak menemukan 'makan', fungsi ini meminta AI
-    menerjemahkannya menjadi 'kuliner', 'food', 'tata boga', dll.
-    """
     try:
         if "GROQ_API_KEY" in st.secrets:
             client = Groq(api_key=st.secrets["GROQ_API_KEY"])
             
-            # Prompt cerdas untuk ekstraksi keyword
             prompt = f"""
             Tugas: Ubah input user yang santai menjadi kata kunci akademis/jurusan kuliah.
             Input User: "{user_query}"
             
             Contoh:
             - Input: "Suka makan" -> Output: kuliner tata boga food beverage hospitality
-            - Input: "Suka debat" -> Output: hukum komunikasi hubungan internasional
-            - Input: "Suka main game" -> Output: informatika desain game multimedia
             
             Output HANYA kata kuncinya saja (dipisah spasi). Jangan ada kata pengantar.
             """
@@ -133,22 +188,22 @@ def get_keywords_via_ai(user_query):
             completion = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3, # Rendah agar fokus dan tidak ngarang
+                temperature=0.3,
                 max_tokens=50,
             )
             return completion.choices[0].message.content
     except:
-        return user_query # Jika error, kembalikan query asli
+        return user_query
     return user_query
 
-# --- Helpers Lama ---
+# --- Helpers Lain ---
 KEYWORD_MAPPING = {
     "menggambar": "desain visual art seni fotografi kreatif sketsa ilustrasi grafis",
     "jualan": "marketing bisnis manajemen pemasaran retail sales perdagangan kewirausahaan entrepreneur",
     "ngoding": "teknologi informasi sistem komputer data algoritma programming python web software aplikasi digital",
     "hitung": "akuntansi statistika matematika ekonomi keuangan pajak finance analisis",
     "jalan-jalan": "pariwisata hospitality hotel tour travel guide tourism wisata perhotelan",
-    "masak": "food beverage tata boga kitchen pastry kuliner makanan minuman chef", # Keyword manual tetap ada sebagai backup cepat
+    "masak": "food beverage tata boga kitchen pastry kuliner makanan minuman chef", 
 }
 
 def get_course_advice(course_name):
@@ -171,113 +226,11 @@ def get_course_difficulty(course_name):
     elif any(k in name for k in ['desain', 'bahasa', 'komunikasi']): return 2
     return 3
 
-
-def bookmark_course(course, program, similarity, difficulty, advice):
-    """Callback to add a course to bookmarks (safe for Streamlit on_click)."""
-    c = str(course).strip()
-    existing = [b for b in st.session_state.bookmarks if b.get('Course') == c]
-    if not existing:
-        st.session_state.bookmarks.append({
-            'Course': c,
-            'Program': program,
-            'Similarity Score': similarity,
-            'Difficulty': int(difficulty) if difficulty is not None else get_course_difficulty(c),
-            'Advice': advice
-        })
-        save_bookmarks_to_file(st.session_state.bookmarks)
-        try:
-            # Tetap pertahankan ini jika Anda ingin otomatis pindah ke halaman bookmark setelah simpan
-            st.query_params = {'menu': ['bookmarks']} 
-        except Exception:
-            pass
-        # BLOK st.rerun() SUDAH DIHAPUS DI SINI. Streamlit akan otomatis rerun.
-        
-    else:
-        # If already exists, keep UX consistent
-        try:
-            st.info("Sudah ada di Bookmark")
-        except Exception:
-            pass
-
-
-def remove_bookmark(course):
-    """Remove a bookmark by course name. Safe to call from `on_click`."""
-    c = str(course).strip()
-    before = len(st.session_state.bookmarks)
-    st.session_state.bookmarks = [b for b in st.session_state.bookmarks if b.get('Course') != c]
-    if len(st.session_state.bookmarks) < before:
-        save_bookmarks_to_file(st.session_state.bookmarks)
-        try:
-            st.success(f"Dihapus: {c}")
-        except Exception:
-            pass
-    else:
-        try:
-            st.info("Bookmark tidak ditemukan")
-        except Exception:
-            pass
-
-
-def remove_bookmark_by_index(idx):
-    """Remove a bookmark by index (safer for URL-triggered actions)."""
-    try:
-        idx = int(idx)
-        if 0 <= idx < len(st.session_state.bookmarks):
-            removed = st.session_state.bookmarks.pop(idx)
-            save_bookmarks_to_file(st.session_state.bookmarks)
-            try:
-                st.success(f"Dihapus: {removed.get('Course')}")
-            except Exception:
-                pass
-            return True
-    except Exception:
-        pass
-    try:
-        st.info("Bookmark tidak ditemukan")
-    except Exception:
-        pass
-    return False
-
-
-def confirm_delete_yes(course):
-    """Handler for confirming deletion from modal/buttons."""
-    remove_bookmark(course)
-    st.session_state['confirm_delete'] = None
-    try:
-        st.rerun()
-    except Exception:
-        pass
-
-
-def confirm_delete_no():
-    """Handler for cancelling deletion."""
-    st.session_state['confirm_delete'] = None
-    try:
-        st.rerun()
-    except Exception:
-        pass
-
-
-def request_remove_bookmark(course):
-    """Set a session flag to confirm bookmark deletion."""
-    st.session_state['confirm_delete'] = str(course).strip()
-
-def recommend_career_paths(courses_list):
-    if not courses_list: return []
-    careers = set()
-    programs = [c['Program'] for c in courses_list]
-    mapping = {
-        'Informatika': ['Software Engineer', 'App Developer', 'Tech Lead'],
-        'Data Science': ['Data Scientist', 'AI Engineer', 'Data Analyst'],
-        'Bisnis': ['Entrepreneur', 'Business Manager', 'Consultant'],
-        'Desain': ['Art Director', 'UI/UX Designer', 'Creative Lead'],
-        'Akuntansi': ['Auditor', 'Financial Analyst', 'Tax Consultant'],
-        'Hospitality': ['Hotel Manager', 'Executive Chef', 'Travel Consultant']
-    }
-    for prog in programs:
-        for key, vals in mapping.items():
-            if key in prog: careers.update(vals)
-    return list(careers)[:5]
+def expand_query(user_query):
+    expanded = user_query.lower()
+    for key, val in KEYWORD_MAPPING.items():
+        if key in expanded: expanded += ' ' + val
+    return expanded
 
 def process_negation(user_input):
     negation_patterns = [r'\b(tidak\s+suka|gak\s+suka|benci|anti)\s+(\w+)']
@@ -290,12 +243,6 @@ def process_negation(user_input):
                 words_to_remove.append(match.group(2))
                 cleaned_text = cleaned_text.replace(match.group(0), '')
     return cleaned_text, words_to_remove
-
-def expand_query(user_query):
-    expanded = user_query.lower()
-    for key, val in KEYWORD_MAPPING.items():
-        if key in expanded: expanded += ' ' + val
-    return expanded
 
 def get_recommendations(user_query, df, words_to_remove=None):
     if df.empty or not user_query.strip(): return pd.DataFrame()
@@ -316,8 +263,249 @@ def get_recommendations(user_query, df, words_to_remove=None):
     except:
         return pd.DataFrame()
 
+# --- FUNGSI CALLBACK & LOGIKA FITUR #1, #2, #3, dan #4 ---
+
+def bookmark_course(course, program, similarity, difficulty, advice):
+    c = str(course).strip()
+    existing = [b for b in st.session_state.bookmarks if b.get('Course') == c]
+    if not existing:
+        st.session_state.bookmarks.append({
+            'Course': c,
+            'Program': program,
+            'Similarity Score': similarity,
+            'Difficulty': int(difficulty) if difficulty is not None else get_course_difficulty(c),
+            'Advice': advice
+        })
+        save_bookmarks_to_file(st.session_state.bookmarks)
+        try:
+            st.query_params = {'menu': ['bookmarks']} 
+        except Exception:
+            pass
+    else:
+        try:
+            st.info("Sudah ada di Bookmark")
+        except Exception:
+            pass
+
+def remove_bookmark(course):
+    c = str(course).strip()
+    before = len(st.session_state.bookmarks)
+    st.session_state.bookmarks = [b for b in st.session_state.bookmarks if b.get('Course') != c]
+    if len(st.session_state.bookmarks) < before:
+        save_bookmarks_to_file(st.session_state.bookmarks)
+        try:
+            st.success(f"Dihapus: {c}")
+        except Exception:
+            pass
+    else:
+        try:
+            st.info("Bookmark tidak ditemukan")
+        except Exception:
+            pass
+
+def request_remove_bookmark(course):
+    st.session_state['confirm_delete'] = str(course).strip()
+    
+def confirm_delete_yes(course):
+    remove_bookmark(course)
+    st.session_state['confirm_delete'] = None
+
+def confirm_delete_no():
+    st.session_state['confirm_delete'] = None
+
+# --- FUNGSI FITUR #2 (PERBANDINGAN) ---
+def toggle_compare(course):
+    """Menambah atau menghapus mata kuliah dari daftar perbandingan."""
+    c = str(course).strip()
+    if c in st.session_state.compare_list:
+        st.session_state.compare_list.remove(c)
+        try:
+            st.success(f"Dihapus dari Perbandingan: {c}")
+        except:
+            pass
+    else:
+        if len(st.session_state.compare_list) < 3: # Batasi maksimum 3
+            st.session_state.compare_list.append(c)
+            try:
+                st.info(f"Ditambahkan ke Perbandingan: {c}")
+            except:
+                pass
+        else:
+            try:
+                st.warning("Maksimal 3 mata kuliah untuk dibandingkan.")
+            except:
+                pass
+
+def analyze_comparison_with_ai(data):
+    """Meminta Groq menganalisis perbandingan data."""
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            
+            summary = "\n".join([f"- {d['Course']} ({d['Program']}, Kecocokan {d['Similarity Score']}%, Kesulitan {d['Difficulty']}/5). Tips: {d['Advice']}" for d in data])
+            
+            prompt = f"""
+            Tugas: Analisis secara singkat (maksimal 3 paragraf) data mata kuliah berikut:
+            {summary}
+
+            Berikan saran final yang gaul dan dukung pengguna untuk memilih berdasarkan data di atas. Gunakan bahasa Indonesia santai dan emoji.
+            """
+            
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=512,
+            )
+            return completion.choices[0].message.content
+    except Exception as e:
+        return f"Gagal mendapatkan insight AI. Error: {str(e)}"
+    return "Tidak ada Insight AI."
+
+def display_comparison_table():
+    if not st.session_state.compare_list:
+        return
+
+    data = [b for b in st.session_state.bookmarks if b['Course'] in st.session_state.compare_list]
+    
+    features = {
+        'Course': 'Mata Kuliah',
+        'Program': 'Jurusan',
+        'Similarity Score': 'Kecocokan Minat',
+        'Difficulty': 'Tingkat Kesulitan (1-5)',
+        'Advice': 'Tips Sukses'
+    }
+    
+    comparison_data = []
+    
+    for key_col, display_name in features.items():
+        row_data = {'Fitur': display_name}
+        for item in data:
+            value = item.get(key_col, '-')
+            
+            if key_col == 'Similarity Score':
+                value = f"{value}%"
+            elif key_col == 'Difficulty':
+                value = '★' * int(value) + '☆' * (5 - int(value))
+            elif key_col == 'Advice':
+                value = value[:100] + '...' if len(value) > 100 else value
+                
+            row_data[item['Course']] = value
+        comparison_data.append(row_data)
+
+    st.subheader(f"Perbandingan ({len(data)} dari 3)")
+    df_comparison = pd.DataFrame(comparison_data).set_index('Fitur')
+    
+    # Mencetak tabel terbalik agar Mata Kuliah menjadi kolom (lebih mudah dibaca)
+    st.dataframe(df_comparison.T, use_container_width=True) 
+    
+    # Tombol Analisis AI
+    if len(data) >= 2:
+        if st.button("🧠 Minta AI Analisis Perbandingan", type="primary"):
+            st.session_state.ai_compare_request = True
+            st.rerun() 
+        
+        if st.session_state.get('ai_compare_request'):
+            with st.spinner("AI sedang menganalisis perbedaan kunci..."):
+                ai_summary = analyze_comparison_with_ai(data)
+                st.markdown(f"**Insight AI:**")
+                st.info(ai_summary)
+                # Reset state setelah analisis selesai
+                st.session_state.ai_compare_request = False 
+
+# --- FUNGSI FITUR #3 (SIMULASI DAMPAK) ---
+
+def request_impact_simulation(course):
+    """Mengatur mata kuliah mana yang akan disimulasikan."""
+    st.session_state.impact_course = course
+    st.session_state.impact_result = None # Reset hasil simulasi sebelumnya
+
+def analyze_impact_with_ai(course_data, user_career_query):
+    """Meminta Groq menganalisis dampak mata kuliah pada karir yang diminta pengguna.
+       Output HANYA menggunakan markdown bold dan unbold.
+    """
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            
+            summary = (
+                f"Mata Kuliah: {course_data['Course']} (Jurusan: {course_data['Program']}). "
+                f"Tingkat Kesulitan: {course_data['Difficulty']}/5. "
+                f"Tips Sukses: {course_data['Advice']}. "
+            )
+            
+            prompt = f"""
+            Tugas: Analisis bagaimana mata kuliah berikut dapat memengaruhi tujuan karir user.
+            
+            Data Matkul: {summary}
+            Tujuan Karir User: {user_career_query}
+            
+            Output analisis dalam format:
+            **1. Relevansi Inti (Core Relevance):** Jelaskan keterkaitan langsung mata kuliah ini dengan tujuan karir user (poin A).
+            **2. Skill yang Diperoleh (Transferable Skills):** Sebutkan minimal 3 soft/hard skill yang didapat dari matkul ini yang bermanfaat untuk karir user (poin B).
+            **3. Rekomendasi Tambahan (Next Steps):** Berikan 2-3 saran konkret (misalnya: matkul pendukung, sertifikasi) untuk memaksimalkan dampak (poin C).
+            **4. Proyeksi Dampak (Impact Score):** Berikan skor (0-100%) dan jelaskan mengapa.
+            
+            Gunakan bahasa Indonesia yang menarik dan format list. Pastikan setiap judul poin menggunakan **bold**.
+            """
+            
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=700,
+            )
+            return completion.choices[0].message.content
+    except Exception as e:
+        return f"Gagal mendapatkan simulasi dampak AI. Error: {str(e)}"
+    return "Tidak ada Simulasi Dampak."
+
+# --- FUNGSI FITUR #4 (ANALISIS JALUR BELAJAR) ---
+
+def request_path_analysis():
+    """Memunculkan modal input analisis jalur karir."""
+    st.session_state.path_query = "Requesting"
+    st.session_state.path_analysis = None
+    
+def analyze_curriculum_path(user_career_path, bookmarked_courses):
+    """Meminta Groq menganalisis dan membandingkan jalur karir.
+       Output HANYA menggunakan markdown bold dan unbold.
+    """
+    try:
+        if "GROQ_API_KEY" in st.secrets:
+            client = Groq(api_key=st.secrets["GROQ_API_KEY"])
+            
+            bookmarked_list = ", ".join([b['Course'] for b in bookmarked_courses])
+            
+            prompt = f"""
+            Tugas: Analisis Jalur Karir dan berikan perbandingan dengan mata kuliah yang sudah disimpan pengguna.
+            
+            Jalur Karir yang Diminta User: **{user_career_path}**
+            Mata Kuliah yang Sudah Disimpan User: {bookmarked_list if bookmarked_list else 'Tidak ada'}
+            
+            Output analisis dalam format:
+            **1. Mata Kuliah Wajib (Core Curriculum):** Sebutkan 5-7 mata kuliah esensial (tidak perlu dari data UBM) yang mutlak dibutuhkan untuk karir **{user_career_path}**.
+            **2. Analisis Kesenjangan (Gap Analysis):** Bandingkan daftar matkul wajib di atas dengan yang sudah disimpan user ({bookmarked_list}). Tunjukkan matkul yang sudah **Match** dan matkul **Gap** yang harus dicari.
+            **3. Rekomendasi Tindakan (Next Step):** Berikan saran konkret bagi user (misalnya: tambahkan matkul X, fokus pada program Y).
+            
+            Gunakan bahasa Indonesia yang gaul dan format list/poin. Pastikan setiap judul poin menggunakan **bold**.
+            """
+            
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.6,
+                max_tokens=800,
+            )
+            return completion.choices[0].message.content
+    except Exception as e:
+        return f"Gagal mendapatkan analisis jalur AI. Error: {str(e)}"
+    return "Tidak ada Analisis Jalur."
+
+
 # ==========================================
-# 3. HALAMAN 1: CARI JURUSAN (LENGKAP)
+# 3. HALAMAN 1: CARI JURUSAN (REKOMENDASI)
+# (Tidak Berubah)
 # ==========================================
 def page_recommendation():
     st.title("🔍 Cari Jurusan & Matkul")
@@ -340,25 +528,18 @@ def page_recommendation():
             st.markdown("---")
             clean_text, ignored = process_negation(user_input)
             
-            # Filter Data Awal
             df_filter = df.copy()
             if sel_prog != "Semua Jurusan": 
                 df_filter = df_filter[df_filter['Program'] == sel_prog]
             
-            # 1. PERCOBAAN PERTAMA: Cari Langsung
             recs = get_recommendations(clean_text, df_filter, ignored)
             
-            # 2. PERCOBAAN KEDUA: Jika Kosong, Panggil Bantuan AI (SMART FALLBACK)
             if recs.empty:
                 with st.spinner("Hmm, mencari hubungan minatmu dengan jurusan yang ada..."):
-                    # Minta AI menerjemahkan "Suka makan" -> "Kuliner Tata Boga"
                     ai_keywords = get_keywords_via_ai(clean_text)
                     st.caption(f"🤖 AI mendeteksi minat terkait: *{ai_keywords}*")
-                    
-                    # Cari ulang pakai kata kunci dari AI
                     recs = get_recommendations(ai_keywords, df_filter, ignored)
             
-            # Tampilkan Hasil
             if not recs.empty:
                 recs['Difficulty'] = recs['Course'].apply(get_course_difficulty)
                 recs = recs[(recs['Difficulty'] >= diff_range[0]) & (recs['Difficulty'] <= diff_range[1])]
@@ -366,7 +547,11 @@ def page_recommendation():
                 if not recs.empty:
                     st.success(f"✅ Ditemukan {len(recs)} Mata Kuliah yang pas!")
 
-                    # reset index to have stable small integer indices for button keys
+                    st.header("Visualisasi Kecocokan")
+                    create_interest_map(recs.to_dict('records')) 
+                    st.markdown("---")
+                    
+                    st.header("Daftar Detail")
                     recs = recs.reset_index(drop=True)
                     for i, row in recs.iterrows():
                         stars = '★' * int(row['Difficulty']) + '☆' * (5 - int(row['Difficulty']))
@@ -384,15 +569,17 @@ def page_recommendation():
                             with st.expander(f"💡 Tips Sukses Mata Kuliah Ini"):
                                 st.info(advice)
                         with col_b:
-                            # Bookmark button uses on_click callback for correctness
                             btn_key = f"bookmark_{i}"
                             st.button("📌 Bookmark", key=btn_key, on_click=bookmark_course, args=(row['Course'], row['Program'], row.get('Similarity Score', None), int(row['Difficulty']) if 'Difficulty' in row else get_course_difficulty(row['Course']), advice))
+                else:
+                    st.error("Waduh, tidak ada matkul yang cocok dengan filter kesulitanmu.")
             else:
                 st.error("Waduh, database kami belum punya matkul yang cocok, meskipun sudah dibantu AI.")
                 st.info("Cobalah ngobrol langsung di menu '🤖 Chat Bebas (AI)' untuk saran lebih lanjut.")
 
 # ==========================================
 # 4. HALAMAN 2: CHAT AI (FACE-TO-FACE)
+# (Tidak Berubah)
 # ==========================================
 def page_chat_ai():
     st.title("🤖 Ngobrol Bareng AI")
@@ -442,36 +629,77 @@ def page_chat_ai():
             
             st.session_state.messages.append({"role": "assistant", "content": full_response})
 
-# --- LOGIKA BACKEND YANG PERLU DIUBAH ---
-
-def confirm_delete_yes(course):
-    """Handler for confirming deletion from modal/buttons."""
-    remove_bookmark(course)
-    st.session_state['confirm_delete'] = None
-
-def confirm_delete_no():
-    """Handler for cancelling deletion."""
-    st.session_state['confirm_delete'] = None
 
 # ==========================================
 # 4.5 HALAMAN: BOOKMARKS (MATA KULIAH TERSIMPAN)
 # ==========================================
 def page_bookmarks():
     st.title("📜 Bookmark (Mata Kuliah Tersimpan)")
-    st.markdown("Daftar mata kuliah yang kamu simpan. Hapus jika sudah tidak perlu.")
+    st.markdown("Daftar mata kuliah yang kamu simpan. Gunakan tombol 'Bandingkan' untuk simulasi, dan 'Simulasi Dampak' untuk proyeksi karir.")
 
     if not st.session_state.bookmarks:
         st.info("Belum ada bookmark. Simpan mata kuliah dari hasil pencarian menggunakan tombol 📌.")
         st.session_state['confirm_delete'] = None
         return
 
-    # Ambil nama mata kuliah yang sedang menunggu konfirmasi hapus
-    to_delete = st.session_state.get('confirm_delete')
+    
+    # --- PENGATURAN AWAL FITUR #4 (JALUR BELAJAR) ---
+    col_path, col_clear = st.columns([4, 1])
+    with col_path:
+        # Tombol untuk memunculkan modal Analisis Jalur Karir
+        if st.button("🗺️ Proyeksi Jalur Karir", type="primary"):
+            request_path_analysis()
+            
+    with col_clear:
+        # Tombol untuk mereset semua analisis
+        if st.button("Bersihkan Analisis"):
+            st.session_state.compare_list = []
+            st.session_state.ai_compare_request = False
+            st.session_state.impact_course = None
+            st.session_state.impact_result = None
+            st.session_state.path_query = None
+            st.session_state.path_analysis = None
+            st.rerun()
 
-    # --- MEMULAI PERULANGAN UNTUK SETIAP BOOKMARK ---
+    st.markdown("---")
+
+    # --- LOGIKA INPUT DAN OUTPUT FITUR #4 ---
+    if st.session_state.path_query == "Requesting":
+        with st.form(key='path_form'):
+            career_path_query = st.text_input(
+                "Tuliskan jalur karir spesifik yang kamu inginkan:", 
+                placeholder="Contoh: Menjadi UI/UX Designer di E-commerce"
+            )
+            path_submit = st.form_submit_button("Analisis Jalur 🔍")
+            
+            if path_submit and career_path_query:
+                with st.spinner(f"AI sedang menganalisis jalur untuk '{career_path_query}'..."):
+                    analysis_result = analyze_curriculum_path(career_path_query, st.session_state.bookmarks)
+                    st.session_state.path_analysis = analysis_result
+                    st.session_state.path_query = "Done"
+                    st.rerun()
+        st.button("❌ Batal Analisis Jalur", on_click=lambda: st.session_state.update(path_query=None, path_analysis=None))
+    
+    if st.session_state.path_analysis and st.session_state.path_query == "Done":
+        st.subheader("📊 Hasil Analisis Jalur Belajar")
+        # Menggunakan st.markdown untuk menampilkan hasil AI tanpa kotak berwarna
+        st.markdown(st.session_state.path_analysis) 
+        st.markdown("---")
+
+    # --- 1. TAMPILKAN TABEL PERBANDINGAN JIKA ADA ITEM (FITUR #2) ---
+    if st.session_state.compare_list:
+        display_comparison_table()
+        st.button("❌ Bersihkan Perbandingan", on_click=lambda: st.session_state.update(compare_list=[], ai_compare_request=False))
+        st.markdown("---")
+
+
+    to_delete = st.session_state.get('confirm_delete')
+    sim_course = st.session_state.get('impact_course')
+
+    # --- 2. MEMULAI PERULANGAN UNTUK SETIAP BOOKMARK ---
     for i, b in enumerate(st.session_state.bookmarks):
         
-        # 1. Tampilkan Kartu Mata Kuliah
+        # 2.1 Tampilkan Kartu Mata Kuliah
         stars = '★' * int(b.get('Difficulty', 3)) + '☆' * (5 - int(b.get('Difficulty', 3)))
         st.markdown(f"""
         <div class="result-card">
@@ -484,37 +712,77 @@ def page_bookmarks():
         with st.expander("💡 Tips Sukses Mata Kuliah Ini"):
             st.info(b.get('Advice', get_course_advice(b['Course'])))
 
-        btn_key = f"request_remove_{i}_{re.sub(r'\\W+', '_', b['Course'])}"
         
-        # 2. Tampilkan Tombol Hapus Bookmark
-        st.button("🗑️ Hapus Bookmark", key=btn_key, on_click=request_remove_bookmark, args=(b['Course'],))
+        # 2.2 Tombol Aksi (Hapus, Bandingkan, dan SIMULASI DAMPAK)
+        col_del, col_comp, col_sim = st.columns([1, 1, 1]) 
+
+        with col_del:
+            btn_key_del = f"request_remove_{i}_{re.sub(r'\\W+', '_', b['Course'])}"
+            st.button("🗑️ Hapus", key=btn_key_del, on_click=request_remove_bookmark, args=(b['Course'],))
+
+        with col_comp:
+            is_comparing = b['Course'] in st.session_state.compare_list
+            label = "✅ Hapus Banding" if is_comparing else "⚖️ Bandingkan"
+            btn_type = "secondary" if not is_comparing else "primary"
+            
+            btn_key_comp = f"toggle_compare_{i}_{re.sub(r'\\W+', '_', b['Course'])}"
+            st.button(label, key=btn_key_comp, on_click=toggle_compare, args=(b['Course'],), type=btn_type)
+
+        with col_sim:
+            btn_key_sim = f"request_sim_{i}_{re.sub(r'\\W+', '_', b['Course'])}"
+            # Cek apakah mata kuliah ini yang sedang menunggu input simulasi
+            is_simulating = sim_course == b['Course']
+            sim_type = "primary" if is_simulating else "secondary"
+            st.button("✨ Simulasi Dampak", key=btn_key_sim, on_click=request_impact_simulation, args=(b['Course'],), type=sim_type)
 
         
-        # --- 3. LOGIKA KONFIRMASI (BERADA DI DALAM LOOP) ---
-        # Konfirmasi hanya ditampilkan jika:
-        # a. Ada item yang akan dihapus (to_delete is not None)
-        # b. Item yang akan dihapus SAMA dengan mata kuliah saat ini (b['Course'])
+        # 2.3 LOGIKA KONFIRMASI (HAPUS)
         if to_delete and to_delete == b['Course']:
             safe_key_yes = f"inline_yes_{re.sub(r'\\W+', '_', to_delete)}"
             safe_key_no = f"inline_no_{re.sub(r'\\W+', '_', to_delete)}"
             
-            # Catatan: Kita menggunakan fallback inline karena st.modal (jika tersedia)
-            # adalah pop-up yang mengambang, bukan elemen yang bisa diletakkan di bawah course.
-
             st.warning(f"⚠️ **KONFIRMASI PENGHAPUSAN:** Yakin ingin menghapus '{to_delete}'?")
             
-            # Tombol "Ya, Hapus"
             col_y_inline, col_n_inline = st.columns([1,1])
             with col_y_inline:
                 st.button("✅ Ya, Hapus", key=safe_key_yes, on_click=confirm_delete_yes, args=(to_delete,), type="primary")
             with col_n_inline:
                 st.button("❌ Batal", key=safe_key_no, on_click=confirm_delete_no)
         
+        # 2.4 LOGIKA SIMULASI DAMPAK (INPUT) - FITUR #3
+        if sim_course and sim_course == b['Course']:
+            st.markdown("---")
+            st.subheader(f"Proyeksikan Dampak '{sim_course}'")
+            
+            # Form untuk Input Karir
+            with st.form(key=f'sim_form_{i}'):
+                career_query = st.text_input(
+                    "Ingin tahu dampak mata kuliah ini ke karir apa?", 
+                    placeholder="Contoh: Menjadi ahli Data Science",
+                    key=f'career_input_{i}'
+                )
+                
+                sim_submit = st.form_submit_button("Luncurkan Analisis 🚀")
+                
+                if sim_submit and career_query:
+                    # Cari data lengkap mata kuliah
+                    course_data = next((item for item in st.session_state.bookmarks if item['Course'] == sim_course), None)
+                    if course_data:
+                        with st.spinner(f"AI sedang memproyeksikan dampak '{sim_course}' ke karir '{career_query}'..."):
+                            impact_result = analyze_impact_with_ai(course_data, career_query)
+                            st.session_state.impact_result = impact_result
+                            st.rerun() 
+            
+            # Tampilkan Hasil Simulasi
+            if st.session_state.impact_result:
+                st.success("✨ **Hasil Proyeksi Dampak:**")
+                # Menggunakan st.markdown, hasilnya akan berwarna putih (default Streamlit)
+                st.markdown(st.session_state.impact_result) 
+                
+            st.button("❌ Tutup Simulasi", key=f'close_sim_{i}', on_click=lambda: st.session_state.update(impact_course=None, impact_result=None))
+            
         st.markdown("<hr style='border: 1px solid #333333;'>", unsafe_allow_html=True)
 
-
-    # --- PENTING: HAPUS SEMUA LOGIKA KONFIRMASI YANG SEBELUMNYA ADA DI BAWAH LOOP ---
-    # Jika sebelumnya ada blok konfirmasi di luar perulangan, pastikan sudah dihapus.
 
 # ==========================================
 # 5. NAVIGASI UTAMA
@@ -537,79 +805,20 @@ def main():
                 st.session_state['app_started'] = True
                 st.rerun()
     else:
-        # Check query params for navigation fallback BEFORE widgets are created
+        # Pengecekan Query Params untuk navigasi (tidak berubah)
         try:
             qp = st.query_params
-            # handle confirm yes/no via query params (used by HTML fallback modal)
-            if 'confirm_index' in qp:
-                try:
-                    raw = qp.get('confirm_index', [None])[0]
-                    if raw is not None:
-                        from urllib.parse import unquote_plus
-                        idx_raw = unquote_plus(raw)
-                        remove_bookmark_by_index(idx_raw)
-                        st.session_state['confirm_delete'] = None
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        st.query_params = {}
-                    except Exception:
-                        pass
-                try:
-                    st.rerun()
-                except Exception:
-                    pass
-            elif 'confirm_yes' in qp:
-                # backward-compatible: try deletion by name if index not provided
-                try:
-                    raw = qp.get('confirm_yes', [None])[0]
-                    if raw:
-                        from urllib.parse import unquote_plus
-                        course_to_delete = unquote_plus(raw)
-                        remove_bookmark(course_to_delete)
-                        st.session_state['confirm_delete'] = None
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        st.query_params = {}
-                    except Exception:
-                        pass
-                try:
-                    st.rerun()
-                except Exception:
-                    pass
-            if 'confirm_no' in qp:
-                # user cancelled via HTML fallback; clear state
-                try:
-                    st.session_state['confirm_delete'] = None
-                except Exception:
-                    pass
-                finally:
-                    try:
-                        st.query_params = {}
-                    except Exception:
-                        pass
-                try:
-                    st.rerun()
-                except Exception:
-                    pass
-
             if qp.get('menu') == ['bookmarks']:
                 st.session_state['menu'] = "📜 Bookmark (Mata Kuliah Tersimpan)"
-                # clear query params
                 try:
                     st.query_params = {}
                 except Exception:
                     pass
         except Exception:
-            # In some runtimes, query_params may not be available; ignore
             pass
 
         with st.sidebar:
             st.title("Menu Aplikasi")
-            # bind radio directly to session_state key 'menu' so we can programmatically change it
             st.radio("Pilih Mode:", ["🔍 Cari Jurusan (Database)", "🤖 Chat Bebas (AI)", "📜 Bookmark (Mata Kuliah Tersimpan)"], key='menu')
             st.markdown("---")
             if st.button("🏠 Kembali ke Depan"):
